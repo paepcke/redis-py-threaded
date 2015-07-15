@@ -6,7 +6,7 @@ import redis
 from redis.exceptions import ConnectionError
 from redis._compat import basestring, u, unichr
 
-from .conftest import r as _redis_client
+from conftest import r as _redis_client
 
 
 def wait_for_message(pubsub, timeout=0.1, ignore_subscribe_messages=False):

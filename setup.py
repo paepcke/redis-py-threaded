@@ -1,7 +1,7 @@
 import multiprocessing
 from setuptools import setup, find_packages
 
-test_requirements = ['sentinels>=0.0.6', 'nose>=1.0', 'python-dateutil>=2.2']
+test_requirements = ['sentinels>=0.0.6', 'nose>=1.0', 'python-dateutil>=2.2', 'pytest>=2.7.2']
 
 setup(
     name = "redis-py-threaded",

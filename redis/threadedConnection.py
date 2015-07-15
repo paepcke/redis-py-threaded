@@ -1,6 +1,6 @@
 from __future__ import with_statement
 
-from distutils.version import StrictVersion
+import Queue
 from itertools import chain
 import os
 from select import select
@@ -10,13 +10,11 @@ import threading
 import warnings
 
 from redis._compat import b, xrange, imap, byte_to_chr, unicode, bytes, long, \
-    BytesIO, nativestr, basestring, iteritems, LifoQueue, Empty, Full, urlparse, \
+    nativestr, basestring, iteritems, LifoQueue, Empty, Full, urlparse, \
     parse_qs, unquote
 from redis.exceptions import RedisError, ConnectionError, TimeoutError, \
     BusyLoadingError, ResponseError, InvalidResponse, AuthenticationError, \
     NoScriptError, ExecAbortError, ReadOnlyError
-from redis.utils import HIREDIS_AVAILABLE
-
 
 try:
     import ssl
@@ -24,26 +22,6 @@ try:
 except ImportError:
     ssl_available = False
 
-if HIREDIS_AVAILABLE:
-    import hiredis
-
-    hiredis_version = StrictVersion(hiredis.__version__)
-    HIREDIS_SUPPORTS_CALLABLE_ERRORS = \
-        hiredis_version >= StrictVersion('0.1.3')
-    HIREDIS_SUPPORTS_BYTE_BUFFER = \
-        hiredis_version >= StrictVersion('0.1.4')
-
-    if not HIREDIS_SUPPORTS_BYTE_BUFFER:
-        msg = ("redis-py works best with hiredis >= 0.1.4. You're running "
-               "hiredis %s. Please consider upgrading." % hiredis.__version__)
-        warnings.warn(msg)
-
-    HIREDIS_USE_BYTE_BUFFER = True
-    # only use byte buffer if hiredis supports it and the Python version
-    # is >= 2.7
-    if not HIREDIS_SUPPORTS_BYTE_BUFFER or (
-            sys.version_info[0] == 2 and sys.version_info[1] < 7):
-        HIREDIS_USE_BYTE_BUFFER = False
 
 SYM_STAR = b('*')
 SYM_DOLLAR = b('$')
@@ -89,7 +67,7 @@ class BaseParser(object):
         return ResponseError(response)
 
 
-class SocketReader(threading.Thread):
+class SocketLineReader(threading.Thread):
     
     # Seconds for socket.recv to time out when
     # nothing is arriving, so that we can check
@@ -97,218 +75,127 @@ class SocketReader(threading.Thread):
     # the delivery buffer:
     SOCKET_READ_TIMEOUT = 0.5
     
-    def __init__(self, socket, dest_buffer, socket_read_size):
+    DO_BLOCK = True
+    
+    def __init__(self, socket, dest_buffer, socket_read_size=4096):
 
         threading.Thread.__init__(self)
 
         self._sock = socket
         # Make the socket non-blocking, so that
-        # we can periodically check whether the
-        # delivery buffer is to be cleared, or this
+        # we can periodically check whether this
         # thread is to stop:
-        self._sock.settimeout(SocketReader.SOCKET_READ_TIMEOUT)
+        self._sock.settimeout(SocketLineReader.SOCKET_READ_TIMEOUT)
         
         self._socket_read_size = socket_read_size
-        self._dest_buffer = dest_buffer
+        self._delivery_queue = Queue.Queue()
         
-        self._bytes_written_lock = threading.Lock()
+        self._done = False
         
-        # Number of bytes written to the buffer from the socket
-        self._bytes_written   = 0
-        self._desired_length  = None
-        self._len_event       = None
+    def empty(self):
+        return self._delivery_queue.empty()
         
-        self._pause_condition = None
-        self._done            = False
+    def readline(self):
         
-    @property
-    def bytes_written(self):
-        return self._bytes_written
+        while not self._done:
+            try:
+                # Read one whole line, without the closing SYM_CRLF,
+                # pausing occasionally to check whether the thread
+                # has been stopped:
+                return self._delivery_queue.get(SocketLineReader.DO_BLOCK, SocketLineReader.SOCKET_READ_TIMEOUT)
+            except Queue.Empty:
+                continue
+        
+    def read(self, length):
+        '''
+        Read the specified number of bytes from the
+        socket. We know from the Redis protocol that
+        even binary payloads will be terminated by
+        SYM_CRLF. So we read in chunks of lines, adding
+        the SYM_CRLF strings that may be part of the
+        binary payload back in as we go. Blocks until
+        enough bytes have been read from the socket.
+        Pauses occasionally to check whether thread
+        has been stopped.
+        
+        Note: the sequence of requested bytes must be
+        followed by a SYM_CRLF coming in from the socket. 
+        
+        :param length: number of bytes to read
+        :type length: int
+        :return: string of requested length
+        :rtype: string
+        :raise IndexError: when requested chunk of bytes does not end in SYM_CRLF.
+        '''
+
+        if length == 0:
+            return ''        
+        msg = []
+
+        while not self._done:
+            # Get one line from socket, blocking if necessary:
+            msgFragment = self.readline()
+            if self._done:
+                return
     
-    def get_length_event(self, desired_length):
-        self._len_event = threading.Event()
-        if desired_length <= self.bytes_written:
-            self._len_event.set()
-            return self._len_event
+            # If there was at least one prior
+            # fragment, add the SYM_CRLF to
+            # its end, b/c that was stripped by
+            # readline():
+            if len(msg) > 0:
+                msg.append(SYM_CRLF)
+            msg.append(msgFragment)
+            if len(msg) < length:
+                continue
+            if len(msg) == length:
+                return ''.join(msg)
         
-        self._desired_length = desired_length
-        return self._len_event
-
-    def reset(self):
-        # Create a Condition for use in synchronizing with
-        # the run() method: 
-        self._pause_condition = threading.Condition()
-        # Acquire the underlying lock...
-        self._pause_condition.acquire()
-        # ... so that we can release the lock, and
-        # wait for it to be available again:
-        self._pause_condition.wait()
-        # The run() method sent a notify(), signalling
-        # that it will pause, and temporarily not read
-        # from the socket; clear related variables:
-
-        self._dest_buffer.seek(0)
-        self._dest_buffer.truncate()
-        self._bytes_written = 0
+            # Requested chunk was not followed by SYM_CRLF:    
+            raise IndexError('Attempt to read byte sequence of length %d from socket that does not end with \r\n' % length)
         
-        # And let the run() method know that it can proceed:
-        self._pause_condition.notify()
-        self._pause_condition.release()
-
+        
     def stop(self):
         self._done = True
 
+    def close(self):
+        self.stop()
+
     def run(self):
         socket_read_size = self._socket_read_size
-        buf = self._dest_buffer
-        buf.seek(self._bytes_written)
-        marker = 0
+        remnant = None
 
         try:
             while True:
                 if self._done:
                     return
-                if self._pause_condition is not None:
-                    # Acquire the pause lock:
-                    self._pause_condition.acquire()
-                    # Notify the thread that called the
-                    # reset() method that this run method
-                    # will pause till the reset method
-                    # is done:
-                    self._pause_condition.notify()
-                    # Wait for reset method to be done:
-                    self._pause_condition.wait()
-                    # Don't need the Condition any more:
-                    self._pause_condition = None
-                    buf = self._dest_buffer
-                    marker = 0
-                    
                 try:
                     data = self._sock.recv(socket_read_size)
+                    if remnant is not None:
+                        data = remnant + data
+                        remnant = None
                 except socket.timeout:
-                    # Just check for whether to stop, or 
-                    # to purge the delivery buffer, then go
-                    # straight into the recv again:
+                    # Just check for whether to stop, and
+                    # go right into recv again:
                     continue
-                # an empty string indicates the server shutdown the socket
+                # An empty string indicates the server shutdown the socket
                 if isinstance(data, bytes) and len(data) == 0:
                     raise socket.error(SERVER_CLOSED_CONNECTION_ERROR)
-                buf.write(data)
-                data_length = len(data)
-                self._bytes_written += data_length
-                marker += data_length
-
-                if self._len_event is not None and \
-                   self._desired_length is not None and \
-                   marker >= self._desired_length:
-                    self._len_event.set()
-                    self._len_event = None
-        except socket.timeout:
-            raise TimeoutError("Timeout reading from socket")
+                if SYM_CRLF in data:
+                    # Final bytes may or may not have their
+                    # closing SYM_CRLF yet:
+                    if data.endswith(SYM_CRLF):
+                        for line in data.split(SYM_CRLF):
+                            self._delivery_queue.put_nowait(line)
+                    else:
+                        lines = data.split(SYM_CRLF)
+                        for line in lines[:-1]:
+                            self._delivery_queue.put_nowait(line)
+                        remnant = lines[-1]
+                    
         except socket.error:
             e = sys.exc_info()[1]
             raise ConnectionError("Error while reading from socket: %s" %
                                   (e.args,))
-
-class SocketBuffer(object):
-    def __init__(self, socket, socket_read_size):
-        self.socket_read_size = socket_read_size
-        self._buffer = BytesIO()
-        self._sock_reader = SocketReader(socket, self._buffer, self.socket_read_size)
-        self._sock_reader.start()
-        # number of bytes read from the buffer
-        self.bytes_read = 0
-
-    @property
-    def length(self):
-        return self._sock_reader.bytes_written - self.bytes_read
-
-    #*************
-    def dumpBuffer(self):
-        currPos = self._buffer.tell()
-        self._buffer.seek(0)
-        bufContent = self.buffer.readall()
-        self._buffer.seek(currPos)
-        return bufContent
-        
-    def dumpBufferRead(self):
-        currPos = self._buffer.tell()
-        self._buffer.seek(0)
-        readStr = self._buffer.read(self.bytes_read)
-        self._buffer.seek(currPos)
-        return readStr
-        
-    def dumpBufferUnread(self):
-        currPos = self._buffer.tell()
-        self._buffer.seek(self.bytes_read)
-        unreadStr = self._buffer.readlines()
-        self._buffer.seek(currPos)
-        return unreadStr
-        
-    #*************
-
-    def read(self, length):
-        length = length + 2  # make sure to read the \r\n terminator
-        # make sure we've read enough data from the socket
-        if length > self.length:
-            # If not, ask the socket reader to set() an event
-            # when the needed length is reached:
-            self._sock_reader.get_length_event(length).wait()
-
-        self._buffer.seek(self.bytes_read)
-        data = self._buffer.read(length)
-        self.bytes_read += len(data)
-
-        # purge the buffer when we've consumed it all so it doesn't
-        # grow forever
-        if self.bytes_read == self._sock_reader.bytes_written:
-            self.purge()
-
-        return data[:-2]
-
-    def readline(self):
-        buf = self._buffer
-        buf.seek(self.bytes_read)
-        data = buf.readline()
-        while not data.endswith(SYM_CRLF):
-            # there's more data in the socket that we need;
-            # wait on an Event provided by the SocketReader:
-            self._sock_reader.get_length_event(self.bytes_read + 1).wait()
-            buf.seek(self.bytes_read)
-            data = buf.readline()
-
-        self.bytes_read += len(data)
-
-        # purge the buffer when we've consumed it all so it doesn't
-        # grow forever
-        if self.bytes_read == self._sock_reader.bytes_written:
-            self.purge()
-
-        return data[:-2]
-
-    def purge(self, total=False):
-        
-        #*************
-        if self._sock_reader.bytes_written < 1024:
-            return
-        #*************
-        
-        if total:
-            self._sock_reader.stop()
-            self._sock_reader = None
-        else:
-            # Keep the socket reader going,
-            # but wait for the socket reader
-            # to clear its own variables that
-            # concern the delivery buffer:
-            self._sock_reader.reset()
-            
-        self.bytes_read = 0
-
-    def close(self):
-        self.purge(total=True)
-        self._buffer.close()
-        self._buffer = None
 
 class PythonParser(BaseParser):
     "Plain Python parsing class"
@@ -328,7 +215,7 @@ class PythonParser(BaseParser):
     def on_connect(self, connection):
         "Called when the socket connects"
         self._sock = connection._sock
-        self._buffer = SocketBuffer(self._sock, self.socket_read_size)
+        self._buffer = SocketLineReader(self._sock, self.socket_read_size)
         if connection.decode_responses:
             self.encoding = connection.encoding
 
@@ -342,8 +229,9 @@ class PythonParser(BaseParser):
             self._buffer = None
         self.encoding = None
 
+
     def can_read(self):
-        return self._buffer and bool(self._buffer.length)
+        return self._buffer and not self._buffer.empty()
 
     def read_response(self):
         response = self._buffer.readline()
@@ -369,7 +257,7 @@ class PythonParser(BaseParser):
             # and/or the pipeline's execute() will raise this error if
             # necessary, so just return the exception instance here.
             return error
-        # single value
+        # simple-string: response holds result:
         elif byte == '+':
             pass
         # int value
@@ -379,6 +267,7 @@ class PythonParser(BaseParser):
         elif byte == '$':
             length = int(response)
             if length == -1:
+                # Null string:
                 return None
             response = self._buffer.read(length)
         # multi-bulk response
@@ -386,122 +275,12 @@ class PythonParser(BaseParser):
             length = int(response)
             if length == -1:
                 return None
-            response = [self.read_response() for i in xrange(length)]
+            response = [self.read_response() for _ in xrange(length)]
         if isinstance(response, bytes) and self.encoding:
             response = response.decode(self.encoding)
         return response
 
-
-class HiredisParser(BaseParser):
-    "Parser class for connections using Hiredis"
-    def __init__(self, socket_read_size):
-        if not HIREDIS_AVAILABLE:
-            raise RedisError("Hiredis is not installed")
-        self.socket_read_size = socket_read_size
-
-        if HIREDIS_USE_BYTE_BUFFER:
-            self._buffer = bytearray(socket_read_size)
-
-    def __del__(self):
-        try:
-            self.on_disconnect()
-        except Exception:
-            pass
-
-    def on_connect(self, connection):
-        self._sock = connection._sock
-        kwargs = {
-            'protocolError': InvalidResponse,
-            'replyError': self.parse_error,
-        }
-
-        # hiredis < 0.1.3 doesn't support functions that create exceptions
-        if not HIREDIS_SUPPORTS_CALLABLE_ERRORS:
-            kwargs['replyError'] = ResponseError
-
-        if connection.decode_responses:
-            kwargs['encoding'] = connection.encoding
-        self._reader = hiredis.Reader(**kwargs)
-        self._next_response = False
-
-    def on_disconnect(self):
-        self._sock = None
-        self._reader = None
-        self._next_response = False
-
-    def can_read(self):
-        if not self._reader:
-            raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
-
-        if self._next_response is False:
-            self._next_response = self._reader.gets()
-        return self._next_response is not False
-
-    def read_response(self):
-        if not self._reader:
-            raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
-
-        # _next_response might be cached from a can_read() call
-        if self._next_response is not False:
-            response = self._next_response
-            self._next_response = False
-            return response
-
-        response = self._reader.gets()
-        socket_read_size = self.socket_read_size
-        while response is False:
-            try:
-                if HIREDIS_USE_BYTE_BUFFER:
-                    bufflen = self._sock.recv_into(self._buffer)
-                    if bufflen == 0:
-                        raise socket.error(SERVER_CLOSED_CONNECTION_ERROR)
-                else:
-                    buffer = self._sock.recv(socket_read_size)
-                    # an empty string indicates the server shutdown the socket
-                    if not isinstance(buffer, bytes) or len(buffer) == 0:
-                        raise socket.error(SERVER_CLOSED_CONNECTION_ERROR)
-            except socket.timeout:
-                raise TimeoutError("Timeout reading from socket")
-            except socket.error:
-                e = sys.exc_info()[1]
-                raise ConnectionError("Error while reading from socket: %s" %
-                                      (e.args,))
-            if HIREDIS_USE_BYTE_BUFFER:
-                self._reader.feed(self._buffer, 0, bufflen)
-            else:
-                self._reader.feed(buffer)
-            # proactively, but not conclusively, check if more data is in the
-            # buffer. if the data received doesn't end with \r\n, there's more.
-            if HIREDIS_USE_BYTE_BUFFER:
-                if bufflen > 2 and \
-                        self._buffer[bufflen - 2:bufflen] != SYM_CRLF:
-                    continue
-            else:
-                if not buffer.endswith(SYM_CRLF):
-                    continue
-            response = self._reader.gets()
-        # if an older version of hiredis is installed, we need to attempt
-        # to convert ResponseErrors to their appropriate types.
-        if not HIREDIS_SUPPORTS_CALLABLE_ERRORS:
-            if isinstance(response, ResponseError):
-                response = self.parse_error(response.args[0])
-            elif isinstance(response, list) and response and \
-                    isinstance(response[0], ResponseError):
-                response[0] = self.parse_error(response[0].args[0])
-        # if the response is a ConnectionError or the response is a list and
-        # the first item is a ConnectionError, raise it as something bad
-        # happened
-        if isinstance(response, ConnectionError):
-            raise response
-        elif isinstance(response, list) and response and \
-                isinstance(response[0], ConnectionError):
-            raise response[0]
-        return response
-
-if HIREDIS_AVAILABLE:
-    DefaultParser = HiredisParser
-else:
-    DefaultParser = PythonParser
+DefaultParser = PythonParser
 
 
 class Connection(object):
@@ -513,7 +292,7 @@ class Connection(object):
                  socket_keepalive=False, socket_keepalive_options=None,
                  retry_on_timeout=False, encoding='utf-8',
                  encoding_errors='strict', decode_responses=False,
-                 parser_class=DefaultParser, socket_read_size=65536):
+                 parser_class=DefaultParser, socket_read_size=4096):
         self.pid = os.getpid()
         self.host = host
         self.port = int(port)
@@ -816,7 +595,7 @@ class UnixDomainSocketConnection(Connection):
                  socket_timeout=None, encoding='utf-8',
                  encoding_errors='strict', decode_responses=False,
                  retry_on_timeout=False,
-                 parser_class=DefaultParser, socket_read_size=65536):
+                 parser_class=DefaultParser, socket_read_size=4096):
         self.pid = os.getpid()
         self.path = path
         self.db = db
