@@ -2055,15 +2055,14 @@ class ConditionedDict(collections.MutableMapping):
         self.wasUpdatedCondition = threading.Condition()
         self.store.update(*args, **kwargs)
         
-    def __enter__(self):
+    def acquire(self):
         self.wasUpdatedCondition.acquire()
-        return self
-        
-    def __exit__(self, aType, value, traceback):
+
+    def release(self):
         self.wasUpdatedCondition.release()
-        
+    
     def wait(self, timeout=None):
-        self.wasUpdatedCondition.wait()
+        self.wasUpdatedCondition.wait(timeout)
 
     def notify(self):
         self.wasUpdatedCondition.notify()
@@ -2148,7 +2147,7 @@ class PubSub(object):
         # so we need to decode channel/pattern names back to unicode strings
         # before passing them to [p]subscribe.
         if self.channels:
-            channels = ThreadSafeDict()
+            channels = {}
             for k, v in iteritems(self.channels):
                 if not self.decode_responses:
                     k = k.decode(self.encoding, self.encoding_errors)
@@ -2267,11 +2266,17 @@ class PubSub(object):
             new_channels[self.encode(channel)] = handler
 
         # Lock the self.channels data structure:
-        with self.channels as channels:
-            
-            # Send subscribe cmd to server
-            ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
+        self.channels.acquire()
 
+        # Send subscribe cmd to server
+        ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
+
+        # Wait for handle_message() to 'notify(),' i.e. to
+        # announce that the subscribe ack from the Redis server
+        # has arrived:
+        
+        self.channels.wait(PubSub.CMD_ACK_TIMEOUT)
+        
             # update the channels dict AFTER we send the command. we don't want to
             # subscribe twice to these channels, once for the command and again
             # for the reconnection.
