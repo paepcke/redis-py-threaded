@@ -1,3 +1,9 @@
+# TODO:
+#   o psubscribe/punsubscribe need events to tell parse_response to wait for ack
+#   o parse_response needs to check for p(un)subscribe in addition to (un)subscribe
+#   o read_response needs to check for p(un)subscribe and set event when discovered.
+
+
 from __future__ import with_statement
 from itertools import chain
 import datetime
@@ -5,6 +11,7 @@ import sys
 import warnings
 import time
 import threading
+import collections
 import time as mod_time
 from redis._compat import (b, basestring, bytes, imap, iteritems, iterkeys,
                            itervalues, izip, long, nativestr, unicode,
@@ -17,7 +24,7 @@ from redis.exceptions import (
     DataError,
     ExecAbortError,
     NoScriptError,
-    PubSubError,
+    #PubSubError,
     RedisError,
     ResponseError,
     TimeoutError,
@@ -288,6 +295,7 @@ class StrictRedis(object):
     Connection and Pipeline derive from this, implementing how
     the commands are sent and received to the Redis server
     """
+    
     RESPONSE_CALLBACKS = dict_merge(
         string_keys_to_dict(
             'AUTH EXISTS EXPIRE EXPIREAT HEXISTS HMSET MOVE MSETNX PERSIST '
@@ -2038,6 +2046,45 @@ class Redis(StrictRedis):
         return self.execute_command('ZADD', name, *pieces)
 
 
+class ConditionedDict(collections.MutableMapping):
+    
+    DONT_BLOCK = False
+
+    def __init__(self, *args, **kwargs):
+        self.store = dict()
+        self.wasUpdatedCondition = threading.Condition()
+        self.store.update(*args, **kwargs)
+        
+    def __enter__(self):
+        self.wasUpdatedCondition.acquire()
+        return self
+        
+    def __exit__(self, aType, value, traceback):
+        self.wasUpdatedCondition.release()
+        
+    def wait(self, timeout=None):
+        self.wasUpdatedCondition.wait()
+
+    def notify(self):
+        self.wasUpdatedCondition.notify()
+        
+    def __setitem__(self, key, value):
+        self.store[key] = value
+
+    def __getitem__(self, key):
+        return self.store[key]
+
+    def __delitem__(self, key):
+        del self.store[key]
+
+    def __iter__(self):
+        return iter(self.store)
+
+    def __len__(self):
+        return len(self.store)
+        
+        
+
 class PubSub(object):
     """
     PubSub provides publish, subscribe and listen support to Redis channels.
@@ -2048,13 +2095,19 @@ class PubSub(object):
     """
     PUBLISH_MESSAGE_TYPES = ('message', 'pmessage')
     UNSUBSCRIBE_MESSAGE_TYPES = ('unsubscribe', 'punsubscribe')
+    SUBSCRIBE_MESSAGE_TYPES = ('subscribe', 'psubscribe')
 
+    # Time to wait for Redis server to acknowledge receipt
+    # of a subscribe or unsubscribe command:
+    CMD_ACK_TIMEOUT = 1.0  # seconds
+    
     def __init__(self, connection_pool, shard_hint=None,
                  ignore_subscribe_messages=False):
         self.connection_pool = connection_pool
         self.shard_hint = shard_hint
         self.ignore_subscribe_messages = ignore_subscribe_messages
         self.connection = None
+        
         # we need to know the encoding options for this connection in order
         # to lookup channel and pattern names for callback handlers.
         conn = connection_pool.get_connection('pubsub', shard_hint)
@@ -2065,6 +2118,8 @@ class PubSub(object):
         finally:
             connection_pool.release(conn)
         self.reset()
+
+    
 
     def __del__(self):
         try:
@@ -2081,8 +2136,8 @@ class PubSub(object):
             self.connection.clear_connect_callbacks()
             self.connection_pool.release(self.connection)
             self.connection = None
-        self.channels = {}
-        self.patterns = {}
+        self.channels = ConditionedDict()
+        self.patterns = ConditionedDict()
 
     def close(self):
         self.reset()
@@ -2093,7 +2148,7 @@ class PubSub(object):
         # so we need to decode channel/pattern names back to unicode strings
         # before passing them to [p]subscribe.
         if self.channels:
-            channels = {}
+            channels = ThreadSafeDict()
             for k, v in iteritems(self.channels):
                 if not self.decode_responses:
                     k = k.decode(self.encoding, self.encoding_errors)
@@ -2161,7 +2216,9 @@ class PubSub(object):
         connection = self.connection
         if not block and not connection.can_read(timeout=timeout):
             return None
-        return self._execute(connection, connection.read_response)
+        res = self._execute(connection, connection.read_response)
+          
+        return res
 
     def psubscribe(self, *args, **kwargs):
         """
@@ -2203,15 +2260,23 @@ class PubSub(object):
         """
         if args:
             args = list_or_args(args[0], args[1:])
+            
         new_channels = {}
         new_channels.update(dict.fromkeys(imap(self.encode, args)))
         for channel, handler in iteritems(kwargs):
             new_channels[self.encode(channel)] = handler
-        ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
-        # update the channels dict AFTER we send the command. we don't want to
-        # subscribe twice to these channels, once for the command and again
-        # for the reconnection.
-        self.channels.update(new_channels)
+
+        # Lock the self.channels data structure:
+        with self.channels as channels:
+            
+            # Send subscribe cmd to server
+            ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
+
+            # update the channels dict AFTER we send the command. we don't want to
+            # subscribe twice to these channels, once for the command and again
+            # for the reconnection.
+            channels.update(new_channels)
+    
         return ret_val
 
     def unsubscribe(self, *args):
@@ -2221,7 +2286,20 @@ class PubSub(object):
         """
         if args:
             args = list_or_args(args[0], args[1:])
-        return self.execute_command('UNSUBSCRIBE', *args)
+
+        # Lock the channels structure:
+        with self.channels as channels:
+            
+            # Send unsubscribe command to the server:
+            cmdRes = self.execute_command('UNSUBSCRIBE', *args)
+            # Wait till other threads have received the
+            # server's ack, and notified us (see handle_messages()):
+            try:
+                channels.wait(PubSub.CMD_ACK_TIMEOUT)
+            except TimeoutError:
+                raise TimeoutError('Unsubscribe did not complete within %d seconds.' % PubSub.CMD_ACK_TIMEOUT)
+            
+        return cmdRes
 
     def listen(self):
         "Listen for messages on channels this client has been subscribed to"
@@ -2273,7 +2351,12 @@ class PubSub(object):
             else:
                 subscribed_dict = self.channels
             try:
-                del subscribed_dict[message['channel']]
+                with subscribed_dict as protected_dict:
+                    del protected_dict[message['channel']]
+                    # Tell the channels or patterns dict that
+                    # underlying server has acknowledged the
+                    # unsubscribe, and the dict was upated:
+                    protected_dict.notify()
             except KeyError:
                 pass
 
@@ -2288,51 +2371,12 @@ class PubSub(object):
                 handler(message)
                 return None
         else:
-            # this is a subscribe/unsubscribe message. ignore if we don't
-            # want them
+            # this is a subscribe message. ignore if we don't
+            # want them.
             if ignore_subscribe_messages or self.ignore_subscribe_messages:
                 return None
 
         return message
-
-    def run_in_thread(self, sleep_time=0):
-        for channel, handler in iteritems(self.channels):
-            if handler is None:
-                raise PubSubError("Channel: '%s' has no handler registered")
-        for pattern, handler in iteritems(self.patterns):
-            if handler is None:
-                raise PubSubError("Pattern: '%s' has no handler registered")
-
-        thread = PubSubWorkerThread(self, sleep_time)
-        thread.start()
-        return thread
-
-
-class PubSubWorkerThread(threading.Thread):
-    def __init__(self, pubsub, sleep_time):
-        super(PubSubWorkerThread, self).__init__()
-        self.pubsub = pubsub
-        self.sleep_time = sleep_time
-        self._running = False
-
-    def run(self):
-        if self._running:
-            return
-        self._running = True
-        pubsub = self.pubsub
-        sleep_time = self.sleep_time
-        while pubsub.subscribed:
-            pubsub.get_message(ignore_subscribe_messages=True,
-                               timeout=sleep_time)
-        pubsub.close()
-        self._running = False
-
-    def stop(self):
-        # stopping simply unsubscribes from all channels and patterns.
-        # the unsubscribe responses that are generated will short circuit
-        # the loop in run(), calling pubsub.close() to clean up the connection
-        self.pubsub.unsubscribe()
-        self.pubsub.punsubscribe()
 
 
 class BasePipeline(object):

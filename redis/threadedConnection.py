@@ -82,6 +82,9 @@ class SocketLineReader(threading.Thread):
         threading.Thread.__init__(self)
 
         self._sock = socket
+        
+        self._sock.setblocking(True)
+        
         # Make the socket non-blocking, so that
         # we can periodically check whether this
         # thread is to stop:
@@ -91,6 +94,7 @@ class SocketLineReader(threading.Thread):
         self._delivery_queue = Queue.Queue()
         
         self._done = False
+        self.start()
         
     def empty(self):
         return self._delivery_queue.empty()
@@ -131,7 +135,8 @@ class SocketLineReader(threading.Thread):
         if length == 0:
             return ''        
         msg = []
-
+        bytes_read = 0
+        
         while not self._done:
             # Get one line from socket, blocking if necessary:
             msgFragment = self.readline()
@@ -144,10 +149,12 @@ class SocketLineReader(threading.Thread):
             # readline():
             if len(msg) > 0:
                 msg.append(SYM_CRLF)
+                bytes_read += 2
             msg.append(msgFragment)
-            if len(msg) < length:
+            bytes_read += len(msgFragment)
+            if bytes_read < length:
                 continue
-            if len(msg) == length:
+            if bytes_read == length:
                 return ''.join(msg)
         
             # Requested chunk was not followed by SYM_CRLF:    
@@ -181,18 +188,33 @@ class SocketLineReader(threading.Thread):
                 if isinstance(data, bytes) and len(data) == 0:
                     raise socket.error(SERVER_CLOSED_CONNECTION_ERROR)
                 if SYM_CRLF in data:
+                    
+                    lines = data.split(SYM_CRLF)
+                                        
+                    # str.split() adds an empty str if the
+                    # str ends in the split symbol. If str does
+                    # not end in the split symbol, the resulting
+                    # array has the unfinished fragment at the end.
+                    # Don't push the final element to the out queue
+                    # either way:
+                    
+                    for line in lines[:-1]:
+                        self._delivery_queue.put_nowait(line)
+                        
                     # Final bytes may or may not have their
                     # closing SYM_CRLF yet:
-                    if data.endswith(SYM_CRLF):
-                        for line in data.split(SYM_CRLF):
-                            self._delivery_queue.put_nowait(line)
-                    else:
-                        lines = data.split(SYM_CRLF)
-                        for line in lines[:-1]:
-                            self._delivery_queue.put_nowait(line)
+                    if not data.endswith(SYM_CRLF):
+                        # Have a partial line at the end:
                         remnant = lines[-1]
                     
         except socket.error:
+            # Will occur legitimately when socket gets closed
+            # via a call to the associated Connection instance's
+            # disconnect() method: that method does call this
+            # thread's stop() method, but the socket may still
+            # be hanging in the recv() above:
+            if self._done:
+                return
             e = sys.exc_info()[1]
             raise ConnectionError("Error while reading from socket: %s" %
                                   (e.args,))
@@ -205,7 +227,7 @@ class PythonParser(BaseParser):
         self.socket_read_size = socket_read_size
         self._sock = None
         self._buffer = None
-
+                
     def __del__(self):
         try:
             self.on_disconnect()
@@ -221,12 +243,14 @@ class PythonParser(BaseParser):
 
     def on_disconnect(self):
         "Called when the socket disconnects"
-        if self._sock is not None:
-            self._sock.close()
-            self._sock = None
+
         if self._buffer is not None:
             self._buffer.close()
             self._buffer = None
+
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
         self.encoding = None
 
 
@@ -234,6 +258,42 @@ class PythonParser(BaseParser):
         return self._buffer and not self._buffer.empty()
 
     def read_response(self):
+        '''
+        Reads one line from the wire, and interprets it.
+        Example: the acknowledgment to an unsubscribe
+        from topic myTopic on the wire looks like this:
+        
+             *3\r\n$11\r\nUNSUBSCRIBE\r\n$7\r\nmyTopic\r\n:1\r\n'
+             
+        *3    # three items to follow
+        $11   # string of 11 chars
+        UNSUBSCRIBE
+        $7    # string of 7 chars
+        myTopic
+        :1    # one topic subscribed to now
+        
+        Each line will cause a recursive call to this method
+        (see elif byte == '*' below).
+        
+        Simpler calls will be individual elements, such
+        as ':12', which returns the integer 12.
+        
+        These are the possible prefixes; each item
+        is followed by a \r\n, which is stripped
+        by SocketLineReader:
+        
+            +<str>    simple string
+            :<int>    integer
+            $<n>    string of length <n>
+            *<num>    start of array with <num> elements
+
+        When the message to parse is the acknowledgment of
+        a SUBSCRIBE or UNSUBSCRIBE command, this method
+        will set() event self.unsubscribeAckEvent/self.unsubscribeAckEvent.
+
+        :return: response string
+        :rtype: string
+        '''
         response = self._buffer.readline()
         if not response:
             raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
@@ -270,6 +330,7 @@ class PythonParser(BaseParser):
                 # Null string:
                 return None
             response = self._buffer.read(length)
+                        
         # multi-bulk response
         elif byte == '*':
             length = int(response)
@@ -278,6 +339,10 @@ class PythonParser(BaseParser):
             response = [self.read_response() for _ in xrange(length)]
         if isinstance(response, bytes) and self.encoding:
             response = response.decode(self.encoding)
+        #***********
+        #print('Response: %s' % byte + '|' + str(response))
+        #***********
+                
         return response
 
 DefaultParser = PythonParser
@@ -323,6 +388,27 @@ class Connection(object):
             self.disconnect()
         except Exception:
             pass
+
+    @property
+    def subscribeAckEvent(self):
+        '''
+        Returns an Event() object that will be set()
+        when the acknowledgment from the Redis server
+        to a prior subscribe command arrives.
+        
+        '''
+        return self._parser.subscribeAckEvent
+
+    @property
+    def unsubscribeAckEvent(self):
+        '''
+        Returns an Event() object that will be set()
+        when the acknowledgment from the Redis server
+        to a prior unsubscribe command arrives.
+        
+        '''
+        return self._parser.unsubscribeAckEvent
+
 
     def register_connect_callback(self, callback):
         self._connect_callbacks.append(callback)
