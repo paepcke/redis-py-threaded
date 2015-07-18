@@ -177,6 +177,8 @@ class SocketLineReader(threading.Thread):
                     return
                 try:
                     data = self._sock.recv(socket_read_size)
+                    if self._done:
+                        return
                     if remnant is not None:
                         data = remnant + data
                         remnant = None
