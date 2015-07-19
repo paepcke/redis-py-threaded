@@ -825,7 +825,8 @@ class StrictRedis(object):
             raise RedisError('bit must be 0 or 1')
         params = [key, bit]
 
-        start is not None and params.append(start)
+        if start is not None:
+            params.append(start)
 
         if start is not None and end is not None:
             params.append(end)
@@ -1599,12 +1600,12 @@ class StrictRedis(object):
         "Return the number of elements in the sorted set ``name``"
         return self.execute_command('ZCARD', name)
 
-    def zcount(self, name, min, max):
+    def zcount(self, name, theMin, theMax):
         """
         Returns the number of elements in the sorted set at key ``name`` with
-        a score between ``min`` and ``max``.
+        a score between ``theMin`` and ``theMax``.
         """
-        return self.execute_command('ZCOUNT', name, min, max)
+        return self.execute_command('ZCOUNT', name, theMin, theMax)
 
     def zincrby(self, name, value, amount=1):
         "Increment the score of ``value`` in sorted set ``name`` by ``amount``"
@@ -1618,12 +1619,12 @@ class StrictRedis(object):
         """
         return self._zaggregate('ZINTERSTORE', dest, keys, aggregate)
 
-    def zlexcount(self, name, min, max):
+    def zlexcount(self, name, theMin, theMax):
         """
         Return the number of items in the sorted set ``name`` between the
-        lexicographical range ``min`` and ``max``.
+        lexicographical range ``theMin`` and ``theMax``.
         """
-        return self.execute_command('ZLEXCOUNT', name, min, max)
+        return self.execute_command('ZLEXCOUNT', name, theMin, theMax)
 
     def zrange(self, name, start, end, desc=False, withscores=False,
                score_cast_func=float):
@@ -1652,10 +1653,10 @@ class StrictRedis(object):
         }
         return self.execute_command(*pieces, **options)
 
-    def zrangebylex(self, name, min, max, start=None, num=None):
+    def zrangebylex(self, name, theMin, theMax, start=None, num=None):
         """
         Return the lexicographical range of values from sorted set ``name``
-        between ``min`` and ``max``.
+        between ``theMin`` and ``theMax``.
 
         If ``start`` and ``num`` are specified, then return a slice of the
         range.
@@ -1663,16 +1664,16 @@ class StrictRedis(object):
         if (start is not None and num is None) or \
                 (num is not None and start is None):
             raise RedisError("``start`` and ``num`` must both be specified")
-        pieces = ['ZRANGEBYLEX', name, min, max]
+        pieces = ['ZRANGEBYLEX', name, theMin, theMax]
         if start is not None and num is not None:
             pieces.extend([Token('LIMIT'), start, num])
         return self.execute_command(*pieces)
 
-    def zrangebyscore(self, name, min, max, start=None, num=None,
+    def zrangebyscore(self, name, theMin, theMax, start=None, num=None,
                       withscores=False, score_cast_func=float):
         """
         Return a range of values from the sorted set ``name`` with scores
-        between ``min`` and ``max``.
+        between ``theMin`` and ``theMax``.
 
         If ``start`` and ``num`` are specified, then return a slice
         of the range.
@@ -1685,7 +1686,7 @@ class StrictRedis(object):
         if (start is not None and num is None) or \
                 (num is not None and start is None):
             raise RedisError("``start`` and ``num`` must both be specified")
-        pieces = ['ZRANGEBYSCORE', name, min, max]
+        pieces = ['ZRANGEBYSCORE', name, theMin, theMax]
         if start is not None and num is not None:
             pieces.extend([Token('LIMIT'), start, num])
         if withscores:
@@ -1707,30 +1708,30 @@ class StrictRedis(object):
         "Remove member ``values`` from sorted set ``name``"
         return self.execute_command('ZREM', name, *values)
 
-    def zremrangebylex(self, name, min, max):
+    def zremrangebylex(self, name, theMin, theMax):
         """
         Remove all elements in the sorted set ``name`` between the
-        lexicographical range specified by ``min`` and ``max``.
+        lexicographical range specified by ``theMin`` and ``theMax``.
 
         Returns the number of elements removed.
         """
-        return self.execute_command('ZREMRANGEBYLEX', name, min, max)
+        return self.execute_command('ZREMRANGEBYLEX', name, theMin, theMax)
 
-    def zremrangebyrank(self, name, min, max):
+    def zremrangebyrank(self, name, theMin, theMax):
         """
         Remove all elements in the sorted set ``name`` with ranks between
-        ``min`` and ``max``. Values are 0-based, ordered from smallest score
+        ``theMin`` and ``theMax``. Values are 0-based, ordered from smallest score
         to largest. Values can be negative indicating the highest scores.
         Returns the number of elements removed
         """
-        return self.execute_command('ZREMRANGEBYRANK', name, min, max)
+        return self.execute_command('ZREMRANGEBYRANK', name, theMin, theMax)
 
-    def zremrangebyscore(self, name, min, max):
+    def zremrangebyscore(self, name, theMin, theMax):
         """
         Remove all elements in the sorted set ``name`` with scores
-        between ``min`` and ``max``. Returns the number of elements removed.
+        between ``theMin`` and ``theMax``. Returns the number of elements removed.
         """
-        return self.execute_command('ZREMRANGEBYSCORE', name, min, max)
+        return self.execute_command('ZREMRANGEBYSCORE', name, theMin, theMax)
 
     def zrevrange(self, name, start, end, withscores=False,
                   score_cast_func=float):
@@ -1754,11 +1755,11 @@ class StrictRedis(object):
         }
         return self.execute_command(*pieces, **options)
 
-    def zrevrangebyscore(self, name, max, min, start=None, num=None,
+    def zrevrangebyscore(self, name, theMax, theMin, start=None, num=None,
                          withscores=False, score_cast_func=float):
         """
         Return a range of values from the sorted set ``name`` with scores
-        between ``min`` and ``max`` in descending order.
+        between ``theMin`` and ``theMax`` in descending order.
 
         If ``start`` and ``num`` are specified, then return a slice
         of the range.
@@ -1771,7 +1772,7 @@ class StrictRedis(object):
         if (start is not None and num is None) or \
                 (num is not None and start is None):
             raise RedisError("``start`` and ``num`` must both be specified")
-        pieces = ['ZREVRANGEBYSCORE', name, max, min]
+        pieces = ['ZREVRANGEBYSCORE', name, theMax, theMin]
         if start is not None and num is not None:
             pieces.extend([Token('LIMIT'), start, num])
         if withscores:
@@ -2087,7 +2088,8 @@ class PubSub(threading.Thread):
             connection_pool.release(conn)
         self.reset()
         
-        # Start a connection to the server:
+        # Start a connection to the server, ignoring
+        # the (hopefully) resulting PONG:
         self.execute_command('PING') 
 
         # Start listening on that connection:        
@@ -2111,7 +2113,7 @@ class PubSub(threading.Thread):
         
         try:
             while not self.done:
-                response = self.handle_message(self.parse_response(block=True))
+                response = self.handle_message(self.parse_response(block=True)) #@UnusedVariable
         except Exception as e:
             # If close() was called by the owner of this
             # client, the closing of subsystems eventually
@@ -2238,31 +2240,36 @@ class PubSub(threading.Thread):
         for pattern, handler in iteritems(kwargs):
             new_patterns[self.encode(pattern)] = handler
 
-        # Make sure the subscribe event flag is initially clear:
-        self.patterns.clearSubscribeAckArrived()
-
-        ret_val = self.execute_command('PSUBSCRIBE', *iterkeys(new_patterns))
-
-        # Wait for handle_message() to announce that the 
-        # subscribe ack from the Redis server has arrived:
-        
-        ackHappened = self.patterns.awaitSubscribeAck()
-        if not ackHappened:
-            # If someone called close, just return:
-            if self.done:
-                return
-            raise ResponseError('Redis server did not acknowledge psubscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
-
-        # Now update the self.patterns data structure;
-        # acquire the access lock.
-        # (update the patternss dict AFTER we send the command. we don't want to
-        # subscribe twice to these patterns, once for the command and again
-        # for the reconnection.):
-        
+        # Get the access lock to the dict that
+        # holds the pattern-subscriptions:
         self.patterns.acquire()
-        self.patterns.update(new_patterns)
-        self.patterns.clearSubscribeAckArrived()
-        self.patterns.release()
+
+        try:
+            # Make sure the subscribe event flag is initially clear:
+            self.patterns.clearSubscribeAckArrived()
+    
+            ret_val = self.execute_command('PSUBSCRIBE', *iterkeys(new_patterns))
+    
+            # Wait for handle_message() to announce that the 
+            # subscribe ack from the Redis server has arrived:
+            
+            ackHappened = self.patterns.awaitSubscribeAck()
+            if not ackHappened:
+                # If someone called close, just return:
+                if self.done:
+                    return
+                raise ResponseError('Redis server did not acknowledge psubscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
+    
+            # Now update the self.patterns data structure;
+            # acquire the access lock.
+            # (update the patternss dict AFTER we send the command. we don't want to
+            # subscribe twice to these patterns, once for the command and again
+            # for the reconnection.):
+            
+            self.patterns.update(new_patterns)
+            self.patterns.clearSubscribeAckArrived()
+        finally:
+            self.patterns.release()
 
         return ret_val
 
@@ -2274,33 +2281,39 @@ class PubSub(threading.Thread):
         if args:
             args = list_or_args(args[0], args[1:])
             
-        # Make sure the unsubscribe event flag is initially clear:
-        self.patterns.clearUnsubscribeAckArrived()
-
-        # Send unsubscribe command to the server:
-        cmdRes = self.execute_command('PUNSUBSCRIBE', *args)
-
-        # Wait for handle_message() to announce that the 
-        # punsubscribe ack from the Redis server has arrived:
-        
-        ackHappened = self.patterns.awaitUnsubscribeAck()
-        if not ackHappened:
-            # If someone called close, just return:
-            if self.done:
-                return
-            raise ResponseError('Redis server did not acknowledge punsubscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
-
-        # Now update the self.patterns data structure;
-        # acquire the access lock.
-        # (update the patterns dict AFTER we send the command. we don't want to
-        # subscribe twice to these channels, once for the command and again
-        # for the reconnection.):
-        
+        # Get the access lock to the dict that
+        # holds the pattern-subscriptions:
         self.patterns.acquire()
-        for pattern in args:
-            del self.patterns[pattern]
-        self.patterns.clearUnsubscribeAckArrived()
-        self.patterns.release()
+        
+        try:
+            
+            # Make sure the unsubscribe event flag is initially clear:
+            self.patterns.clearUnsubscribeAckArrived()
+    
+            # Send unsubscribe command to the server:
+            cmdRes = self.execute_command('PUNSUBSCRIBE', *args)
+    
+            # Wait for handle_message() to announce that the 
+            # punsubscribe ack from the Redis server has arrived:
+            
+            ackHappened = self.patterns.awaitUnsubscribeAck()
+            if not ackHappened:
+                # If someone called close, just return:
+                if self.done:
+                    return
+                raise ResponseError('Redis server did not acknowledge punsubscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
+    
+            # Now update the self.patterns data structure;
+            # acquire the access lock.
+            # (update the patterns dict AFTER we send the command. we don't want to
+            # subscribe twice to these channels, once for the command and again
+            # for the reconnection.):
+            
+            for pattern in args:
+                del self.patterns[pattern]
+            self.patterns.clearUnsubscribeAckArrived()
+        finally:
+            self.patterns.release()
             
         return cmdRes
 
@@ -2319,32 +2332,38 @@ class PubSub(threading.Thread):
         for channel, handler in iteritems(kwargs):
             new_channels[self.encode(channel)] = handler
 
-        # Make sure the subscribe event flag is initially clear:
-        self.channels.clearSubscribeAckArrived()
+        # Get the access lock to the dict that
+        # holds the channel subscriptions:
+        self.patterns.acquire()
 
-        # Send subscribe cmd to server
-        ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
-
-        # Wait for handle_message() to announce that the 
-        # subscribe ack from the Redis server has arrived:
-        
-        ackHappened = self.channels.awaitSubscribeAck()
-        if not ackHappened:
-            # If someone called close, just return:
-            if self.done:
-                return
-            raise ResponseError('Redis server did not acknowledge subscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
-
-        # Now update the self.channels data structure;
-        # acquire the access lock.
-        # (update the channels dict AFTER we send the command. we don't want to
-        # subscribe twice to these channels, once for the command and again
-        # for the reconnection.):
-        
-        self.channels.acquire()
-        self.channels.update(new_channels)
-        self.channels.clearSubscribeAckArrived()
-        self.channels.release()
+        try:
+            
+            # Make sure the subscribe event flag is initially clear:
+            self.channels.clearSubscribeAckArrived()
+    
+            # Send subscribe cmd to server
+            ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
+    
+            # Wait for handle_message() to announce that the 
+            # subscribe ack from the Redis server has arrived:
+            
+            ackHappened = self.channels.awaitSubscribeAck()
+            if not ackHappened:
+                # If someone called close, just return:
+                if self.done:
+                    return
+                raise ResponseError('Redis server did not acknowledge subscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
+    
+            # Now update the self.channels data structure;
+            # acquire the access lock.
+            # (update the channels dict AFTER we send the command. we don't want to
+            # subscribe twice to these channels, once for the command and again
+            # for the reconnection.):
+            
+            self.channels.update(new_channels)
+            self.channels.clearSubscribeAckArrived()
+        finally:
+            self.channels.release()
     
         return ret_val
 
@@ -2356,33 +2375,38 @@ class PubSub(threading.Thread):
         if args:
             args = list_or_args(args[0], args[1:])
 
-        # Make sure the unsubscribe event flag is initially clear:
-        self.channels.clearUnsubscribeAckArrived()
+        # Get the access lock to the dict that
+        # holds the channel subscriptions:
+        self.patterns.acquire()
 
-        # Send unsubscribe command to the server:
-        cmdRes = self.execute_command('UNSUBSCRIBE', *args)
-
-        # Wait for handle_message() to announce that the 
-        # unsubscribe ack from the Redis server has arrived:
-        
-        ackHappened = self.channels.awaitUnsubscribeAck()
-        if not ackHappened:
-            # If someone called close, just return:
-            if self.done:
-                return
-            raise ResponseError('Redis server did not acknowledge unsubscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
-
-        # Now update the self.channels data structure;
-        # acquire the access lock.
-        # (update the channels dict AFTER we send the command. we don't want to
-        # subscribe twice to these channels, once for the command and again
-        # for the reconnection.):
-        
-        self.channels.acquire()
-        for channel in args:
-            del self.channels[channel]
-        self.channels.clearUnsubscribeAckArrived()
-        self.channels.release()
+        try:
+            # Make sure the unsubscribe event flag is initially clear:
+            self.channels.clearUnsubscribeAckArrived()
+    
+            # Send unsubscribe command to the server:
+            cmdRes = self.execute_command('UNSUBSCRIBE', *args)
+    
+            # Wait for handle_message() to announce that the 
+            # unsubscribe ack from the Redis server has arrived:
+            
+            ackHappened = self.channels.awaitUnsubscribeAck()
+            if not ackHappened:
+                # If someone called close, just return:
+                if self.done:
+                    return
+                raise ResponseError('Redis server did not acknowledge unsubscribe request within %d seconds' % PubSub.CMD_ACK_TIMEOUT)
+    
+            # Now update the self.channels data structure;
+            # acquire the access lock.
+            # (update the channels dict AFTER we send the command. we don't want to
+            # subscribe twice to these channels, once for the command and again
+            # for the reconnection.):
+            
+            for channel in args:
+                del self.channels[channel]
+            self.channels.clearUnsubscribeAckArrived()
+        finally:
+            self.channels.release()
             
         return cmdRes
 
@@ -2421,14 +2445,6 @@ class PubSub(threading.Thread):
                 'data': response[2]
             }
 
-        # if this is an unsubscribe message, indicate that
-        # (p)unsubscribe() method(s) may now remove the
-        # subscription from memory:
-        if message_type in self.UNSUBSCRIBE_MESSAGE_TYPES:
-            if message_type == 'punsubscribe':
-                self.patterns.setUnsubscribeAckArrived()
-            else:
-                self.channels.setUnsubscribeAckArrived()
             
         if message_type in self.PUBLISH_MESSAGE_TYPES:
             # if there's a message handler, invoke it
@@ -2440,7 +2456,22 @@ class PubSub(threading.Thread):
             if handler:
                 handler(message)
                 return None
-        else:
+            else:
+                return message
+            
+        elif message_type in self.UNSUBSCRIBE_MESSAGE_TYPES:
+            # if this is an unsubscribe message, indicate that
+            # (p)unsubscribe() method(s) may now remove the
+            # subscription from memory:
+            
+            if message_type == 'punsubscribe':
+                self.patterns.setUnsubscribeAckArrived()
+            else:
+                self.channels.setUnsubscribeAckArrived()
+            if ignore_subscribe_messages or self.ignore_subscribe_messages:
+                return None
+            
+        elif message_type in self.SUBSCRIBE_MESSAGE_TYPES:
             # this is a (p)subscribe message. ignore if we don't
             # want them, but let (p)subscribe() method(s) know that
             # the ack arrived:

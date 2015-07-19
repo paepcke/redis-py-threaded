@@ -342,7 +342,7 @@ class PythonParser(BaseParser):
         if isinstance(response, bytes) and self.encoding:
             response = response.decode(self.encoding)
         #***********
-        #print('Response: %s' % byte + '|' + str(response))
+        print('Response: %s' % byte + '|' + str(response))
         #***********
                 
         return response
