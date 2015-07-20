@@ -80,6 +80,7 @@ class SocketLineReader(threading.Thread):
     def __init__(self, socket, dest_buffer, socket_read_size=4096):
 
         threading.Thread.__init__(self)
+        self.setDaemon(True)
 
         self._sock = socket
         
@@ -88,7 +89,7 @@ class SocketLineReader(threading.Thread):
         # Make the socket non-blocking, so that
         # we can periodically check whether this
         # thread is to stop:
-        self._sock.settimeout(SocketLineReader.SOCKET_READ_TIMEOUT)
+        #******self._sock.settimeout(SocketLineReader.SOCKET_READ_TIMEOUT)
         
         self._socket_read_size = socket_read_size
         self._delivery_queue = Queue.Queue()
@@ -176,7 +177,12 @@ class SocketLineReader(threading.Thread):
                 if self._done:
                     return
                 try:
+                    #**********
+                    print('Listen to socket...')
+                    #**********
                     data = self._sock.recv(socket_read_size)
+                    #**********
+                    print('Ret from socket...')
                     if self._done:
                         return
                     if remnant is not None:
@@ -342,7 +348,7 @@ class PythonParser(BaseParser):
         if isinstance(response, bytes) and self.encoding:
             response = response.decode(self.encoding)
         #***********
-        print('Response: %s' % byte + '|' + str(response))
+        #print('Response: %s' % byte + '|' + str(response))
         #***********
                 
         return response

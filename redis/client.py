@@ -565,6 +565,9 @@ class StrictRedis(object):
         subscribe to channels and listen for messages that get published to
         them.
         """
+        #*************
+        print('Creating PubSub instance...')
+        #*************
         return PubSub(self.connection_pool, **kwargs)
 
     # COMMAND EXECUTION AND PROTOCOL PARSING
@@ -2069,13 +2072,26 @@ class PubSub(threading.Thread):
     def __init__(self, connection_pool, shard_hint=None,
                  ignore_subscribe_messages=False):
 
+        #*************
+        print('Pubsub init: at start')
+        #*************
+        
         threading.Thread.__init__(self, name='PubSubThread')
+        #*******self.setDaemon(True)
+        
+        #*************
+        print('Pubsub init: after thread. init')
+        #*************
         
         self.connection_pool = connection_pool
         self.shard_hint = shard_hint
         self.ignore_subscribe_messages = ignore_subscribe_messages
         self.done = False
         self.connection = None
+       
+        #*************
+        print('Pubsub init: calling get_connection()')
+        #*************
         
         # we need to know the encoding options for this connection in order
         # to lookup channel and pattern names for callback handlers.
@@ -2090,6 +2106,9 @@ class PubSub(threading.Thread):
         
         # Start a connection to the server, ignoring
         # the (hopefully) resulting PONG:
+        #*************
+        print('Pinging')
+        #*************
         self.execute_command('PING') 
 
         # Start listening on that connection:        
@@ -2113,6 +2132,12 @@ class PubSub(threading.Thread):
         
         try:
             while not self.done:
+                # We don't do anything with the response,
+                # because this implementation only supports
+                # handler-based operation: the call to
+                # handle_message() will call registered
+                # handler methods/functions. The assigment
+                # stays for setting breakpoints during debugging:
                 response = self.handle_message(self.parse_response(block=True)) #@UnusedVariable
         except Exception as e:
             # If close() was called by the owner of this
@@ -2121,6 +2146,7 @@ class PubSub(threading.Thread):
             # we know when a prior close() call was the cause,
             # and just exit this PubSub thread:
             if self.done:
+                print("Closing PubSub thread.")
                 return
             else:
                 # An actual error occurred:
@@ -2334,7 +2360,7 @@ class PubSub(threading.Thread):
 
         # Get the access lock to the dict that
         # holds the channel subscriptions:
-        self.patterns.acquire()
+        self.channels.acquire()
 
         try:
             
@@ -2377,7 +2403,7 @@ class PubSub(threading.Thread):
 
         # Get the access lock to the dict that
         # holds the channel subscriptions:
-        self.patterns.acquire()
+        self.channels.acquire()
 
         try:
             # Make sure the unsubscribe event flag is initially clear:
@@ -2430,6 +2456,9 @@ class PubSub(threading.Thread):
         message being returned.
         """
         message_type = nativestr(response[0])
+        #********
+        #print('Got incoming: %s' % response)
+        #********
         if message_type == 'pmessage':
             message = {
                 'type': message_type,
